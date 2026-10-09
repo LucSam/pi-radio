@@ -1,0 +1,1 @@
+{"name":"pi-radio","version":"0.1.0","private":true,"type":"module","engines":{"node":">=22.14.0"},"scripts":{"dev":"node scripts/serve.mjs","start":"node scripts/serve.mjs"}}
