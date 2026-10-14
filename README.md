@@ -12,7 +12,23 @@ Sender antippen oder Abspielen drücken. Stummschaltung und Stoppen stehen direk
 
 ## Bluetooth
 
-Box einmal unter macOS / Raspberry Pi OS koppeln und als Systemausgabe auswählen. Der Browser sendet den Audiostream an diese Ausgabe. Es gibt keine fingierte Bluetooth-Suche: Web Bluetooth ist keine Schnittstelle für A2DP-Lautsprecher. Falls der Browser die Audioauswahl direkt unterstützt, erscheint zusätzlich „Ausgabe im Browser wählen“. Kein Mikrofonzugriff erforderlich. Die konkreten Boxen müssen am Pi geprüft werden.
+Auf dem Pi: **Audioausgabe → Boxen suchen → Gerät auswählen → Koppeln**. Die Box bzw. den Empfänger vorher in den Kopplungsmodus bringen. Die Suche dauert etwa 15 Sekunden und zeigt klassische Bluetooth-Audiogeräte mit gemeldeter Audiofunktion, zwei pro Seite. Bereits gekoppelte Geräte bieten **Verbinden**. Nach erfolgreicher Auswahl steht **„Verbunden · Audio bereit“** am Gerät; **Trennen** beendet die Verbindung, ohne die gespeicherte Kopplung zu löschen. Die Lautstärke bleibt an Box/System einstellbar, ohne zusätzlichen App-Regler.
+
+Die Kopplung unterstützt Audioempfänger ohne PIN-Eingabedialog. Der tatsächlich ausgestrahlte Gerätename wird angezeigt. Falls ein Empfänger nicht erscheint oder nicht verbindet, den Kopplungsmodus erneut aktivieren und gegebenenfalls eine bestehende Verbindung zu einem anderen Gerät trennen. Anschließend Sender starten und Ton testen.
+
+`server/bluetooth.mjs` verbindet die lokale Oberfläche mit **BlueZ (`bluetoothctl`)** und dem Audio-Dienst über **`pactl`**. Benötigt wird Raspberry Pi OS mit Desktop, funktionierendem Bluetooth und PipeWire/PulseAudio. Den Node-Server als denselben angemeldeten Benutzer wie Chromium starten, **nicht mit sudo**. Bei Bedarf auf dem Pi: `sudo apt install bluez pulseaudio-utils libspa-0.2-bluetooth`. Die Lite-Ausgabe braucht zusätzlich eine eingerichtete Audio-Sitzung; sie ist kein direkt getesteter Zielaufbau.
+
+Die App prüft die gespeicherte Kopplung, koppelt nur neue Geräte, vertraut dem ausdrücklich ausgewählten Empfänger und verbindet ihn. Sie wählt das verfügbare A2DP-Stereoprofil und die Systemausgabe. Bereits laufende Chromium-/Firefox-Audiostreams werden dorthin verschoben; andere Programme werden nicht aktiv verschoben. Neue Systemtöne können ebenfalls die neue Standardausgabe nutzen. „Audio bereit“ setzt eine bestätigte Verbindung und Audioausgabe voraus. Eine reine Bluetooth-Verbindung ohne Stereoaudio erscheint nicht als Erfolg. Die App ändert weder Mikrofonkonfiguration noch Lautstärke. Nach einem Neustart bleibt die BlueZ-Kopplung gespeichert; eine automatische Wiederverbindung hängt vom Betriebssystem und Empfänger ab. Die App hat keine dauernde Wiederverbindungsschleife.
+
+Auf dem **Mac** bleibt die echte Kopplung unter Systemeinstellungen → Bluetooth und Ton. **Demo ansehen** erlaubt die Touchbedienung mit ausdrücklich markierten Beispielgeräten. Die Demo sendet keinerlei Kopplungs- oder Audiobefehle. Eine normale Webseite kann Bluetooth-Audioempfänger nicht über Web Bluetooth koppeln; der lokale Pi-Dienst übernimmt diese Aufgabe. Falls der Browser die Audioauswahl unterstützt, bleibt „Ausgabe im Browser wählen“ verfügbar.
+
+Der Adapter läuft sowohl im eigenständigen Radioserver als auch im gemeinsamen Startmenü unter `api/bluetooth`. Nur lokale Anfragen, begrenzte JSON-Aktionen und fest vorgegebene Befehle mit Argumentlisten sind erlaubt; keine Shell und keine frei wählbaren Betriebssystembefehle. Fremde Origins und unbekannte Geräteadressen werden abgewiesen. Es läuft höchstens eine Bluetooth-Aktion gleichzeitig. Ein fehlender Adapter oder Audio-Dienst wird ausdrücklich angezeigt. Kein zusätzlicher Dienst mit Rootrechten nötig.
+
+**Prüfstand:** Mac-Fallback und Demo sowie simulierte Linux-Antworten in Chrome/WebKit auf 480 × 320, 480 × 480, 800 × 480 und 1280 × 720 geprüft, einschließlich kalibrierter Klickpositionen. Diensttests prüfen PIN-freie Kopplung, Wiederverbindung ohne erneutes Pairing, Stereoausgabe, Fehler, parallele Anfragen und HTTP-Zugriff. BlueZ-5.66-Befehle wurden gegen den Quelltext abgeglichen. **Funkverbindung und Audioausgabe müssen auf der jeweiligen Hardware zusätzlich geprüft werden.**
+
+Quellen: [BlueZ bluetoothctl](https://manpages.debian.org/trixie/bluez/bluetoothctl.1.en.html), [BlueZ 5.66](https://github.com/bluez/bluez/blob/5.66/client/main.c), [pactl](https://manpages.debian.org/trixie/pulseaudio-utils/pactl.1.en.html), [Raspberry Pi: PipeWire](https://www.raspberrypi.com/news/bookworm-the-new-version-of-raspberry-pi-os/).
+
+Prüfen: `npm test`; bei laufender gemeinsamer Vorschau zusätzlich `node ../startmenue/tests/radio-bluetooth.mjs` und dieselbe Zeile mit `webkit` am Ende.
 
 ## Senderreihenfolge
 

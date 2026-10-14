@@ -1,6 +1,8 @@
 import {stations as presets,streamUrl} from './stations.js';
+import {bluetoothView} from './bluetooth.js';
 const $=s=>document.querySelector(s),audio=$('#audio'),embedded=parent!==window;
 const bridge=(type,extra={})=>{if(embedded)parent.postMessage({protocol:'pi-display-v1',type,...extra},location.origin);};
+const bluetooth=bluetoothView(()=>bridge('rendered'),audio);
 let stored;try{stored=JSON.parse(localStorage.getItem('pi-radio')??'{}');}catch{stored={};}
 const stations=[...presets,...(Array.isArray(stored.custom)?stored.custom:[]).filter(s=>typeof s.name==='string'&&s.name.length<=50&&streamUrl(s.url)).slice(0,30)];
 let selected=stations.find(s=>s.id===stored.selected)??stations[0],page=0,pending=false,request=0,timeout;
@@ -54,7 +56,7 @@ $('#station-picker').addEventListener('click',()=>stationMenu($('#station-menu')
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){stationMenu(false);$('#station-picker').focus();}});
 $('#stations').addEventListener('click',e=>{const button=e.target.closest('[data-station]');if(!button)return;stationMenu(false);const station=stations.find(s=>s.id===button.dataset.station);if(station.id===selected.id&&!audio.paused)return;selected=station;resetMetadata();persist();render();void play();});
 $('#previous').addEventListener('click',()=>{page=Math.max(0,page-1);render();});$('#next').addEventListener('click',()=>{page=Math.min(Math.ceil(stations.length/4)-1,page+1);render();});
-function show(id){stationMenu(false);for(const page of ['player','output','custom'])$('#'+page).hidden=page!==id;bridge('rendered');}
+function show(id){stationMenu(false);for(const page of ['player','output','custom'])$('#'+page).hidden=page!==id;bluetooth.setVisible(id==='output');bridge('rendered');}
 document.addEventListener('click',e=>{const id=e.target.closest('[data-page]')?.dataset.page;if(id)show(id);});
 $('#home').addEventListener('click',()=>{if(embedded)bridge('home');else location.href='http://127.0.0.1:5173/';});
 $('#station-form').addEventListener('submit',e=>{e.preventDefault();const name=$('#custom-name').value.trim(),url=streamUrl($('#custom-url').value.trim());if(!name||!url){$('#form-error').textContent='Name und direkte HTTPS-Audioadresse eingeben.';return;}if(stations.filter(s=>s.custom).length>=30){$('#form-error').textContent='Maximal 30 eigene Sender.';return;}const station={id:crypto.randomUUID(),name,url,region:'Eigener Sender',custom:true};stations.push(station);selected=station;page=Math.floor((stations.length-1)/4);stop();resetMetadata();persist();render();show('player');$('#station-form').reset();});
