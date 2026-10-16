@@ -5,9 +5,19 @@ import {createBluetooth,bluetoothHandler,parseDevice} from './bluetooth.mjs';
 const address='AA:BB:CC:DD:EE:FF',sinkName='bluez_output.AA_BB_CC_DD_EE_FF.1';
 function fixture(options={}){
  const calls=[];let paired=!!options.paired,connected=false,trusted=false,output='alsa_output.hdmi',activeProfile='headset-head-unit';
+ const radios=[{id:2,type:'bluetooth',soft:options.softBlocked?'blocked':'unblocked',hard:options.hardBlocked?'blocked':'unblocked'},...(options.otherRadios??[])];
  const info=()=>`Device ${address}\n Name: Mpow BH044D\n Alias: Mpow BH044D\n Class: 0x00240404\n Icon: audio-card\n Paired: ${paired?'yes':'no'}\n Trusted: ${trusted?'yes':'no'}\n Connected: ${connected?'yes':'no'}\n UUID: Audio Sink (0000110b-0000-1000-8000-00805f9b34fb)`;
  const run=async(command,args)=>{
   calls.push([command,...args]);
+  if([options.missing].flat().includes(command))throw Object.assign(Error('spawn failed'),{code:'ENOENT'});
+  if(command==='rfkill'||command==='/usr/sbin/rfkill'){
+   if(args[0]==='--json')return options.rfkillOutput??JSON.stringify({rfkilldevices:radios});
+   if(args[0]==='unblock'){
+    if(options.unblockDenied)throw Object.assign(Error('Permission denied'),{code:'EACCES'});
+    const radio=radios.find(row=>String(row.id)===args[1]);assert(radio&&radio.type==='bluetooth'&&radio.hard==='unblocked');
+    if(!options.stillBlocked)radio.soft='unblocked';return '';
+   }
+  }
   if(command==='bluetoothctl'){
    const a=args[0]==='--timeout'?args.slice(2):[...args];if(a[0]==='--agent')a.splice(0,2);
    if(a[0]==='show')return 'Controller 11:22:33:44:55:66 Pi\n Powered: yes';
@@ -18,7 +28,7 @@ function fixture(options={}){
    if(a[0]==='trust'){trusted=true;return 'trust succeeded';}
    if(a[0]==='connect'){connected=true;return 'Connection successful';}
    if(a[0]==='disconnect'){connected=false;output='alsa_output.hdmi';return 'Successful disconnected';}
-   if(a[0]==='power')return 'Changing power on succeeded';
+   if(a[0]==='power')return options.powerFailure||radios.some(r=>r.type==='bluetooth'&&(r.soft==='blocked'||r.hard==='blocked'))?'Failed to set power on: org.bluez.Error.Failed':'Changing power on succeeded';
   }
   if(command==='pactl'){
    if(options.noAudio)throw Object.assign(Error('Connection refused'),{stderr:'pa_context_connect() failed: Connection refused'});
@@ -63,6 +73,61 @@ test('Bluetooth without audio sink does not report audio ready',async()=>{
 test('Pairing rejection and missing audio service are explicit',async()=>{
  const {adapter}=fixture({pairFailure:true});await adapter.act('connect',address);assert.match((await adapter.settled()).error,/abgelehnt/);
  const absent=fixture({noAudio:true});assert.equal((await absent.adapter.state()).available,false);await assert.rejects(absent.adapter.act('scan'),/Audio-Dienst/);
+});
+test('Missing required tools name the command and its installation package',async()=>{
+ for(const [missing,packageName] of [['pactl','pulseaudio-utils'],['bluetoothctl','bluez']]){
+  const {adapter,calls}=fixture({missing});const state=await adapter.state();
+  assert.equal(state.available,false);assert(state.message.includes(missing)&&state.message.includes(packageName));
+  await assert.rejects(adapter.act('scan'),error=>error.message.includes(packageName));
+  assert(!calls.some(call=>['power','unblock','scan'].includes(call[1])));
+ }
+});
+test('Software blocks are removed only for explicit scan/connect and only on Bluetooth IDs',async()=>{
+ for(const action of ['scan','connect']){
+  const {adapter,calls}=fixture({paired:true,softBlocked:true,otherRadios:[{id:0,type:'wlan',soft:'blocked',hard:'blocked'}]});
+  await adapter.state();assert(!calls.some(call=>['unblock','power','scan','connect'].includes(call[1])),'Status reads must not enable a radio');
+  await adapter.act(action,action==='connect'?address:undefined);const state=await adapter.settled();assert.equal(state.error,null);
+  assert.deepEqual(calls.filter(call=>call[1]==='unblock'),[['rfkill','unblock','2']]);
+  assert(calls.findIndex(call=>call[1]==='unblock')<calls.findIndex(call=>call[1]==='power'));
+  assert(!calls.some(call=>call[0]==='sudo'||call.includes('all')));
+  if(action==='connect')assert(state.devices[0].output);
+ }
+ const {adapter,calls}=fixture({softBlocked:true,paired:true});await adapter.act('disconnect',address);await adapter.settled();
+ assert(!calls.some(call=>['unblock','power'].includes(call[1])),'Disconnect must not enable a blocked radio');
+});
+test('A hardware block prevents power, unblock, scan and pairing commands',async()=>{
+ for(const action of ['scan','connect']){
+  const {adapter,calls}=fixture({softBlocked:true,hardBlocked:true});await adapter.act(action,action==='connect'?address:undefined);
+  assert.match((await adapter.settled()).error,/Hardware-Sperre/);
+  assert(!calls.some(call=>['unblock','power','scan','connect','--agent'].includes(call[1])));
+ }
+});
+test('Unblock denial or an unchanged block cannot be reported as successful discovery',async()=>{
+ for(const options of [{unblockDenied:true},{stillBlocked:true}]){
+  const {adapter,calls}=fixture({softBlocked:true,...options});await adapter.act('scan');const state=await adapter.settled();
+  assert.equal(state.busy,false);assert.match(state.error,options.unblockDenied?/Rechte zum Entsperren/:/per Software gesperrt/);
+  assert(!calls.some(call=>['power','scan'].includes(call[1])));
+  assert(!calls.some(call=>call[0]==='/usr/sbin/rfkill'),'Permission errors must not trigger a path fallback');
+ }
+});
+test('A restricted user-service PATH still allows the fixed Debian rfkill path',async()=>{
+ for(const action of ['scan','connect']){
+  const {adapter,calls}=fixture({missing:'rfkill',softBlocked:true});
+  await adapter.act(action,action==='connect'?address:undefined);const state=await adapter.settled();assert.equal(state.error,null);
+  assert(calls.some(call=>call[0]==='/usr/sbin/rfkill'&&call[1]==='--json'));
+  assert.deepEqual(calls.filter(call=>call[0]==='/usr/sbin/rfkill'&&call[1]==='unblock'),[['/usr/sbin/rfkill','unblock','2']]);
+  if(action==='connect')assert(state.devices[0].output);
+ }
+});
+test('Optional rfkill absence or unsupported output does not break an otherwise working adapter',async()=>{
+ for(const options of [{missing:['rfkill','/usr/sbin/rfkill']},{rfkillOutput:'old output'},{rfkillOutput:'{"rfkilldevices":[{"id":"2; reboot","type":"bluetooth","soft":"blocked","hard":"unblocked"}]}'}]){
+  const {adapter,calls}=fixture(options);await adapter.act('scan');assert.equal((await adapter.settled()).error,null);
+  assert(calls.some(call=>call.includes('scan')));assert(!calls.some(call=>call[1]==='unblock'));
+ }
+});
+test('A generic BlueZ power failure points to the local adapter, not the receiver',async()=>{
+ const {adapter}=fixture({powerFailure:true,missing:'rfkill'});await adapter.act('scan');const state=await adapter.settled();
+ assert.match(state.error,/Bluetooth am Pi lässt sich nicht einschalten/);assert.doesNotMatch(state.error,/Box/);
 });
 test('Invalid addresses and concurrent requests cannot issue device commands',async()=>{
  let endScan;const {adapter,calls}=fixture({scanWait:()=>new Promise(resolve=>endScan=resolve)});

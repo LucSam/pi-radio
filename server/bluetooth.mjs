@@ -38,16 +38,67 @@ function errorMessage(error){
 export function createBluetooth({platform=process.platform,run=runCommand,wait=pause,scanSeconds=15}={}){
  let state={available:false,busy:false,action:null,devices:[],message:'Bluetooth wird geprüft.',error:null,output:null};
  let refreshed=0,refreshing,job;
+ const required=async(command,args,timeout)=>{
+  try{return await run(command,args,timeout);}catch(error){
+   if(error.code==='ENOENT')throw fault(command==='pactl'?'pactl fehlt. Auf dem Pi das Paket pulseaudio-utils installieren.':'bluetoothctl fehlt. Auf dem Pi das Paket bluez installieren.');
+   throw error;
+  }
+ };
  const bt=async(args,timeout=8000)=>{
   // In BlueZ 5.66 --timeout also delays successful one-shot commands until
   // the full timeout. Use it only to hold discovery open; Node bounds others.
   const cli=args[0]==='scan'?['--timeout',String(Math.ceil(timeout/1000)-1),...args]:args;
-  const text=await run('bluetoothctl',cli,timeout);
+  const text=await required('bluetoothctl',cli,timeout);
   if(/Failed|No default controller|not available|org\.bluez\.Error/i.test(text))throw Object.assign(Error(text),{stdout:text});
   return text;
  };
- const pulse=(args)=>run('pactl',args);
+ const pulse=(args)=>required('pactl',args);
  const list=async kind=>jsonList(await pulse(['--format=json','list',kind]));
+ const hardBlock='Bluetooth ist durch eine Hardware-Sperre ausgeschaltet. Schalter oder Bluetooth-Einstellungen am Pi prüfen.';
+ const softBlock='Bluetooth ist am Pi per Software gesperrt. Bluetooth in den Systemeinstellungen einschalten und erneut versuchen.';
+ const rfkill=async(args)=>{
+  try{return await run('rfkill',args);}catch(error){
+   if(error.code!=='ENOENT')throw error;
+   // Desktop user services may omit Debian's sbin directory from PATH.
+   return run('/usr/sbin/rfkill',args);
+  }
+ };
+ async function radioBlocks(){
+  // Optional: a missing/older rfkill must not prevent normal BlueZ operation.
+  // Explicit columns and C locale keep the util-linux JSON format predictable.
+  try{
+   const rows=JSON.parse(await rfkill(['--json','--output','ID,TYPE,SOFT,HARD','list','bluetooth'])).rfkilldevices;
+   if(!Array.isArray(rows))return null;
+   const bluetooth=rows.filter(row=>row?.type==='bluetooth');
+   if(bluetooth.some(row=>!Number.isSafeInteger(row.id)||row.id<0||row.id>0xffffffff||!['blocked','unblocked'].includes(row.soft)||!['blocked','unblocked'].includes(row.hard)))return null;
+   return bluetooth;
+  }catch{return null;}
+ }
+ async function powerOn(){
+  const blocks=await radioBlocks();
+  if(blocks?.some(row=>row.hard==='blocked'))throw fault(hardBlock);
+  const soft=blocks?.filter(row=>row.soft==='blocked')??[];
+  for(const row of soft){
+   // Only verified Bluetooth IDs, never "all", WLAN or a client-supplied ID.
+   try{await rfkill(['unblock',String(row.id)]);}catch(error){
+    const denied=error.code==='EACCES'||error.code==='EPERM'||/Permission|not permitted|AccessDenied/i.test(String(error.stderr??'')+' '+error.message);
+    throw fault(denied?'Bluetooth ist per Software gesperrt; der App fehlen die Rechte zum Entsperren. Bluetooth in den Systemeinstellungen am Pi einschalten.':softBlock);
+   }
+  }
+  if(soft.length){
+   const after=await radioBlocks();
+   if(after?.some(row=>row.hard==='blocked'))throw fault(hardBlock);
+   if(!after||soft.some(row=>!after.some(next=>next.id===row.id&&next.soft==='unblocked')))throw fault(softBlock);
+  }
+  try{await bt(['power','on']);}catch(error){
+   // A controller power failure is not evidence of a problem with the box.
+   const after=await radioBlocks();
+   if(after?.some(row=>row.hard==='blocked'))throw fault(hardBlock);
+   if(after?.some(row=>row.soft==='blocked'))throw fault(softBlock);
+   if(error.status||/NotAuthorized|Permission|AccessDenied/i.test(String(error.stderr??'')+' '+error.message))throw error;
+   throw fault('Bluetooth am Pi lässt sich nicht einschalten. Bluetooth-Einstellungen und Bluetooth-Dienst am Pi prüfen.');
+  }
+ }
  async function inspect(){
   if(platform!=='linux')return {available:false,devices:[],output:null,message:'Bluetooth-Suche ist auf dem Raspberry Pi verfügbar. Am Mac die Box unter Systemeinstellungen → Bluetooth und Ton wählen.'};
   const controller=await bt(['show']);
@@ -106,7 +157,7 @@ export function createBluetooth({platform=process.platform,run=runCommand,wait=p
  async function connect(address){
   let device=parseDevice(address,await bt(['info',address]));
   if(!device.candidate)throw fault('Das gewählte Gerät meldet keine Audiofunktion.',400);
-  await bt(['power','on']);
+  await powerOn();
   // Calling pair on an already paired device removes its existing pairing.
   if(!device.paired)await bt(['--agent','NoInputNoOutput','pair',address],50000);
   device=parseDevice(address,await bt(['info',address]));
@@ -136,7 +187,7 @@ export function createBluetooth({platform=process.platform,run=runCommand,wait=p
    job=(async()=>{
     let error=null;
     try{
-     if(action==='scan'){await bt(['power','on']);await bt(['scan','bredr'],(scanSeconds+1)*1000);}
+     if(action==='scan'){await powerOn();await bt(['scan','bredr'],(scanSeconds+1)*1000);}
      else if(action==='connect')await connect(address);
      else await bt(['disconnect',address],15000);
     }catch(e){error=errorMessage(e);}
